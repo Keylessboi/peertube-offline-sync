@@ -1,51 +1,48 @@
-"""SQLite ledger of what was fetched. SQLite is fine here: it lives on a
-local-path volume, never NFS."""
+"""JSON ledger of what was fetched.
+
+A JSON file, not SQLite: the cluster keeps this on an NFS volume, where SQLite
+locking is unsafe. One writer is guaranteed by the CronJob's
+concurrencyPolicy: Forbid; writes are atomic (temp file + rename)."""
 from __future__ import annotations
 
+import json
 import os
-import sqlite3
 import time
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS videos (
-  uuid TEXT PRIMARY KEY,
-  short_uuid TEXT,
-  channel TEXT,
-  title TEXT,
-  duration INTEGER,
-  remote_path TEXT,
-  status TEXT NOT NULL,        -- downloaded | watched | deleted
-  reason TEXT,
-  fetched_at REAL,
-  updated_at REAL
-);
-"""
 
 
 class State:
     def __init__(self, directory: str):
         os.makedirs(directory, exist_ok=True)
-        self.db = sqlite3.connect(os.path.join(directory, "state.db"))
-        self.db.row_factory = sqlite3.Row
-        self.db.executescript(SCHEMA)
+        self.path = os.path.join(directory, "state.json")
+        try:
+            with open(self.path) as fh:
+                self.rows: dict[str, dict] = json.load(fh)
+        except FileNotFoundError:
+            self.rows = {}
+
+    def _save(self) -> None:
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(self.rows, fh, indent=1, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, self.path)
 
     def known(self, uuid: str) -> bool:
-        return self.db.execute("SELECT 1 FROM videos WHERE uuid=?", (uuid,)).fetchone() is not None
+        return uuid in self.rows
 
     def add(self, uuid, short_uuid, channel, title, duration, remote_path):
         now = time.time()
-        self.db.execute(
-            "INSERT OR REPLACE INTO videos VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (uuid, short_uuid, channel, title, duration, remote_path, "downloaded", "", now, now),
-        )
-        self.db.commit()
+        self.rows[uuid] = {
+            "uuid": uuid, "short_uuid": short_uuid, "channel": channel, "title": title,
+            "duration": duration, "remote_path": remote_path, "status": "downloaded",
+            "reason": "", "fetched_at": now, "updated_at": now,
+        }
+        self._save()
 
     def set_status(self, uuid: str, status: str, reason: str = ""):
-        self.db.execute(
-            "UPDATE videos SET status=?, reason=?, updated_at=? WHERE uuid=?",
-            (status, reason, time.time(), uuid),
-        )
-        self.db.commit()
+        self.rows[uuid].update(status=status, reason=reason, updated_at=time.time())
+        self._save()
 
-    def by_status(self, status: str) -> list[sqlite3.Row]:
-        return self.db.execute("SELECT * FROM videos WHERE status=?", (status,)).fetchall()
+    def by_status(self, status: str) -> list[dict]:
+        return [r for r in self.rows.values() if r["status"] == status]

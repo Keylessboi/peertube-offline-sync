@@ -130,3 +130,9 @@ def test_reconcile_ignores_empty_or_failed_listing(tmp_path):
     assert reconcile_phone(cfg, st, FakeDav([])) == 0
     assert reconcile_phone(cfg, st, FakeDav(RuntimeError("down"))) == 0
     assert st.by_status("downloaded")
+
+
+def test_state_survives_restart(tmp_path):
+    cfg, st, p = seeded(tmp_path)
+    again = State(str(tmp_path))
+    assert again.known("u1") and again.by_status("downloaded")
